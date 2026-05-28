@@ -38,8 +38,8 @@ io.on('connection', (socket) => {
       const roomId = genId();
       matches[roomId] = {
         players: {
-          [socket.id]: { id: socket.id, name: socket.data.name, times: [], clickedThisRound: false },
-          [opponent.socketId]: { id: opponent.socketId, name: opponent.name, times: [], clickedThisRound: false },
+          [socket.id]:        { id: socket.id,        name: socket.data.name, times: [], clickedThisRound: false },
+          [opponent.socketId]:{ id: opponent.socketId, name: opponent.name,   times: [], clickedThisRound: false },
         },
         round: 0, totalRounds: 5,
         phase: 'waiting', goTimeout: null,
@@ -63,21 +63,49 @@ io.on('connection', (socket) => {
     const roomId = socket.data.roomId;
     if (!roomId || !matches[roomId]) return;
     const match = matches[roomId];
-    if (match.phase !== 'go') { socket.emit('too_early'); return; }
     const player = match.players[socket.id];
     if (!player || player.clickedThisRound) return;
+
+    if (match.phase !== 'go') {
+      // Clicked too early — instant round loss (9999 = DNF penalty)
+      player.clickedThisRound = true;
+      player.times.push(9999);
+      socket.emit('too_early');
+      socket.to(roomId).emit('opponent_clicked', { time: 9999 });
+      // If other player already clicked, end round
+      if (Object.values(match.players).every(p => p.clickedThisRound)) {
+        clearTimeout(match.goTimeout);
+        endRound(roomId);
+      }
+      // Otherwise wait for them — but end soon
+      else {
+        match.earlyPenaltyTimeout = setTimeout(() => {
+          if (!matches[roomId]) return;
+          Object.values(match.players).forEach(p => {
+            if (!p.clickedThisRound) { p.times.push(9999); p.clickedThisRound = true; }
+          });
+          clearTimeout(match.goTimeout);
+          endRound(roomId);
+        }, 4000);
+      }
+      return;
+    }
+
+    // Normal click during GO phase
     player.clickedThisRound = true;
     player.times.push(reactionMs);
     socket.to(roomId).emit('opponent_clicked', { time: reactionMs });
+
     if (Object.values(match.players).every(p => p.clickedThisRound)) {
       clearTimeout(match.goTimeout);
       endRound(roomId);
     }
   });
 
-  socket.on('webrtc_offer', ({ offer }) => { const r = socket.data.roomId; if (r) socket.to(r).emit('webrtc_offer', { offer }); });
-  socket.on('webrtc_answer', ({ answer }) => { const r = socket.data.roomId; if (r) socket.to(r).emit('webrtc_answer', { answer }); });
-  socket.on('webrtc_ice', ({ candidate }) => { const r = socket.data.roomId; if (r) socket.to(r).emit('webrtc_ice', { candidate }); });
+  // WebRTC signaling
+  socket.on('webrtc_offer',  ({ offer })     => { const r=socket.data.roomId; if(r) socket.to(r).emit('webrtc_offer',  { offer }); });
+  socket.on('webrtc_answer', ({ answer })    => { const r=socket.data.roomId; if(r) socket.to(r).emit('webrtc_answer', { answer }); });
+  socket.on('webrtc_ice',    ({ candidate }) => { const r=socket.data.roomId; if(r) socket.to(r).emit('webrtc_ice',    { candidate }); });
 
   socket.on('play_again', () => {
     const roomId = socket.data.roomId;
@@ -113,9 +141,12 @@ function startRound(roomId) {
     if (!matches[roomId]) return;
     match.phase = 'go';
     io.to(roomId).emit('go', { serverTime: Date.now() });
+    // Auto-end if nobody clicks after 5s
     match.goTimeout = setTimeout(() => {
       if (!matches[roomId]) return;
-      Object.values(match.players).forEach(p => { if (!p.clickedThisRound) { p.times.push(9999); p.clickedThisRound = true; } });
+      Object.values(match.players).forEach(p => {
+        if (!p.clickedThisRound) { p.times.push(9999); p.clickedThisRound = true; }
+      });
       endRound(roomId);
     }, 5000);
   }, delay);
